@@ -21,7 +21,7 @@ def load_embedding(questions: List[str], config: Dict) -> List[List[float]]:
     if not question_embedding_files:
         question_embedding_lst = config["embedding_func"].embed(questions, input_type="search_document")
         for i, question_embed in enumerate(question_embedding_lst):
-            np.save(f"question_embed_{i}.npy", question_embed)
+            np.save(f"embedding_cache/question_embed_{i}.npy", question_embed)
     else:
         question_embedding_lst = []
         for embedding_file in question_embedding_files:
@@ -38,6 +38,7 @@ def create_store(config):
 
     doc_store = {pair["question"]: pair["answer"] for pair in content.get("questions", [])}
     if config["enable_llm"]:
+        # create question vectorstore
         questions = list(doc_store.keys())
         questions_embedding = load_embedding(questions, config)
         question_embedding_pairs = zip(questions, questions_embedding)
@@ -47,7 +48,6 @@ def create_store(config):
                                                distance_strategy=DistanceStrategy.COSINE)
     else:
         question_store = None
-
 
     return question_store, doc_store
 
@@ -59,13 +59,35 @@ def check_relevance(question1, question2, config):
     response = config["llm"].chat(
         model=config["LLM_MODEL"],
         message=json.dumps([
-            ('system', "Reply only Yes or No if the two questions below are similar or not."),
+            ('system', "Reply only Yes or No if the two questions below are relevant. Two questions are relevant if they have similar words or the same semantic meaning."),
             ('user', f'Question1:{question1}\n\nQuestion2:{question2}')
         ])
     )
 
     print(response)
     return "yes" in response.text.lower()
+
+
+def get_similar_question(question, config):
+    question_store = config["question_store"]
+    response = question_store.similarity_search_with_relevance_scores(question)
+    print("get_similar_question from question_store: ", response)
+    similar_exist_questions = [r.page_content for r, _ in response]
+    print("get_similar_question from question_store: ", similar_exist_questions)
+
+    response = config["llm"].rerank(
+        query=question,
+        documents=similar_exist_questions,
+        model="rerank-v3.5",
+        top_n=1
+    )
+    print("rerank similar questions: ", response)
+    most_similar_question = similar_exist_questions[response.results[0].index]
+    print("most similar question: ", most_similar_question)
+    if check_relevance(question, most_similar_question, config):
+        return most_similar_question
+    return ""
+
 
 def response_generator(messages: List[str], config):
     """
@@ -74,46 +96,42 @@ def response_generator(messages: List[str], config):
     print(messages[-1])
     question = messages[-1]["content"]
     print(f"{question=}")
-    question_store = config["question_store"]
     doc_store = config["doc_store"]
-    print(config)
 
     answer = "no answer"
     if question in doc_store:
-        print("question found in doc_store")
         # Exist question
         answer = doc_store[question]
     elif config["enable_llm"]:
         # Search similar exist question
         print("search similar question")
-        similar_exist_question, score = question_store.similarity_search_with_relevance_scores(question, k=1)[0]
-        print(f"{similar_exist_question=}, {score=}")
-        similar_exist_question = similar_exist_question.page_content
-        if check_relevance(question, similar_exist_question, config):
-            answer = doc_store[similar_exist_question]
+        if similar_question := get_similar_question(question, config):
+            answer = doc_store[similar_question]
 
     print("answer: ", answer)
     return answer
 
-def generate_llm_response(messages, config):
+
+def llm_response_generator(messages, config):
     stream = config["llm"].chat_stream(
         model=config["LLM_MODEL"],
         message=json.dumps([
             {"role": m["role"], "content": m["content"]}
-            for m in messages
+            for m in messages[-3:]
         ])
     )
     for data in stream:
         if data.event_type == "text-generation":
             yield data.text
 
+
 def clean_question(question):
     """
     Clean the question
     """
-    question = re.sub("[\d]+", "", question)
-    question = re.sub("^select", "", question, flags=re.IGNORECASE)
+    question = re.sub(r"\s{2,}", "", question).strip()
     return question
+
 
 def init_config():
     config = {
@@ -127,6 +145,7 @@ def init_config():
         config["LLM_MODEL"] = "command-a-03-2025"
 
     return config
+
 
 def main():
     if "config" not in st.session_state:
@@ -146,10 +165,9 @@ def main():
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    question = st.selectbox("Select question", [""] + get_exist_questions(doc_store))
-    if not question:
-        return
-
+    question = st.selectbox("Select question",
+                            options=get_exist_questions(doc_store),
+                            placeholder="")
     if "Ask" in question:
         question = st.text_input(
             "Questions: ", placeholder="Ask me anything ...", key="input"
@@ -167,20 +185,18 @@ def main():
     })
 
     response = response_generator(st.session_state.messages, st.session_state.config)
-    print("from response_generate:", type(response))
     if response != "no answer":
         st.chat_message("assistant").markdown(response)
     else:
-        print(st.session_state.config)
-        print("to llm response")
         if st.session_state.config["enable_llm"]:
-            response = st.chat_message("assistant").write_stream(generate_llm_response(st.session_state.messages, st.session_state.config))
+            response = st.chat_message("assistant").write_stream(llm_response_generator(st.session_state.messages, st.session_state.config))
         else:
-            st.chat_message("assistant").markdown(response)
+            st.chat_message("assistant").markdown("No answer to your question. You can select the question from the above list.")
 
     st.session_state.messages.append({
         "role": "assistant",
         "content": response
     })
+
 
 main()
