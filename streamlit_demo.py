@@ -19,6 +19,7 @@ def load_embedding(questions: List[str], config: Dict) -> List[List[float]]:
 
     question_embedding_files = glob.glob("embedding_cache/*.npy")
     if not question_embedding_files:
+        os.makedirs("embedding_cache", exist_ok=True)
         question_embedding_lst = config["embedding_func"].embed(questions, input_type="search_document")
         for i, question_embed in enumerate(question_embedding_lst):
             np.save(f"embedding_cache/question_embed_{i}.npy", question_embed)
