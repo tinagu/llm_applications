@@ -1,0 +1,7 @@
+langchain==0.2.1
+langchain-community==0.2.1
+langchain-core==0.2.43
+langchain-experimental==0.0.59
+langchain-text-splitters==0.2.4
+streamlit==1.52.1
+streamlit-chat==0.1.0
